@@ -1,0 +1,6 @@
+{
+  "name": "IVY Parent Connect",
+  "description": "Parent communication and announcement platform for IVY Childcare Services with announcements, calendar, RSVP, acknowledgment, and bilingual English/Amharic support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

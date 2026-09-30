@@ -1,0 +1,136 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'V*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.1)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Resolve Version and Tag
+        id: versioning
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG_NAME="${{ github.event.inputs.tag }}"
+          else
+            TAG_NAME="${{ github.ref_name }}"
+          fi
+
+          # Strip leading 'v' or 'V' for the Android versionName
+          VERSION_NAME="${TAG_NAME#v}"
+          VERSION_NAME="${VERSION_NAME#V}"
+          # Use GitHub run_number so every build increments monotonically
+          VERSION_CODE="${{ github.run_number }}"
+
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+          echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
+          echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
+          echo "Resolved Tag: $TAG_NAME, Version Name: $VERSION_NAME, Version Code: $VERSION_CODE"
+
+      - name: Prepare Keystore & Environment Files
+        run: |
+          # 1. Setup .env file for the Secrets Gradle Plugin
+          if [ ! -f .env ]; then
+            if [ -f .env.example ]; then
+              echo "Creating .env from .env.example..."
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
+
+          # 2. Check if custom signing secrets exist
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "Custom release keystore secret detected. Decoding..."
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.keystore
+            echo "KEYSTORE_PATH=$GITHUB_WORKSPACE/release.keystore" >> $GITHUB_ENV
+            echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
+            echo "USE_RELEASE_SIGNING=true" >> $GITHUB_ENV
+          else
+            echo "No custom release keystore secret found. Preparing fallback debug keystore..."
+            if [ -f debug.keystore.base64 ]; then
+              base64 -d debug.keystore.base64 > debug.keystore
+            elif [ ! -f debug.keystore ]; then
+              keytool -genkey -v -keystore debug.keystore -storepass android \
+                -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
+                -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            fi
+            echo "USE_RELEASE_SIGNING=false" >> $GITHUB_ENV
+          fi
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Android APK with Gradle
+        run: |
+          if [ "$USE_RELEASE_SIGNING" = "true" ]; then
+            echo "Building signed Release APK..."
+            ./gradlew assembleRelease -PversionCode="$VERSION_CODE" -PversionName="$VERSION_NAME" --stacktrace
+            APK_SRC="app/build/outputs/apk/release/app-release.apk"
+          else
+            echo "Building APK using debug keystore fallback..."
+            ./gradlew assembleDebug -PversionCode="$VERSION_CODE" -PversionName="$VERSION_NAME" --stacktrace
+            APK_SRC="app/build/outputs/apk/debug/app-debug.apk"
+          fi
+
+          if [ ! -f "$APK_SRC" ]; then
+            echo "Error: Generated APK not found at $APK_SRC"
+            exit 1
+          fi
+
+          mkdir -p dist
+          APK_NAME="IVY-Connect-${TAG_NAME}.apk"
+          cp "$APK_SRC" "dist/$APK_NAME"
+          echo "APK_PATH=dist/$APK_NAME" >> $GITHUB_ENV
+          echo "APK_NAME=$APK_NAME" >> $GITHUB_ENV
+          echo "Successfully generated dist/$APK_NAME"
+
+      - name: Upload APK as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_NAME }}
+          path: ${{ env.APK_PATH }}
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: "IVY-Connect ${{ env.TAG_NAME }}"
+          files: ${{ env.APK_PATH }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
